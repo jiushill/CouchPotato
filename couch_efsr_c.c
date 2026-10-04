@@ -112,11 +112,20 @@ long EfsRpcQueryUsersOnFile(handle_t binding_h,
     StubDesc.mFlags = 0x1;
 
     CLIENT_CALL_RETURN ret;
-    ret = NdrClientCall2(
-        &StubDesc,
-        (PFORMAT_STRING)ProcFmt,
-        binding_h,
-        FileName,
-        pUsers);
+    RtlZeroMemory(&ret, sizeof(ret));
+    OutputDebugStringA("[DBG couch_efsr_c] calling NdrClientCall2\n");
+    __try {
+        ret = NdrClientCall2(
+            &StubDesc,
+            (PFORMAT_STRING)ProcFmt,
+            binding_h,
+            FileName,
+            pUsers);
+    } __except (GetExceptionCode() == EXCEPTION_BREAKPOINT
+                ? EXCEPTION_CONTINUE_SEARCH
+                : (OutputDebugStringA("[CRASH couch_efsr_c] code=0x%08lX addr=%p\n"),
+                   EXCEPTION_EXECUTE_HANDLER)) {
+        ret.Simple = (ULONG_PTR)0xC0000005L;
+    }
     return (long)ret.Simple;
 }
