@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <rpc.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "couch_efsr_h.h"
 #include "util.h"
 #include <winsock2.h>
@@ -28,26 +29,17 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
     char buf[512];
     DWORD code = ep ? ep->ExceptionRecord->ExceptionCode : 0;
     PVOID addr = ep ? ep->ExceptionRecord->ExceptionAddress : NULL;
-    PVOID rip  = ep ? (PVOID)ep->ContextRip : NULL;
+    PVOID rip  = (ep && ep->ContextRecord) ? (PVOID)ep->ContextRecord->Rip : NULL;
     _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "[CRASH] code=0x%lX addr=%p rip=%p RIP=%p thread=%lu",
-        code, addr, rip, rip, GetCurrentThreadId());
+        "[CRASH] code=0x%lX addr=%p rip=%p thread=%lu",
+        code, addr, rip, GetCurrentThreadId());
     OutputDebugStringA(buf);
     OutputDebugStringA("\n");
     fputs(buf, stderr);
     fputs("\n", stderr);
     fflush(stderr);
-    // try to also dump where we crashed (sourcer-relative)
-    fprintf(stderr, "Stack: %p %p %p %p\n",
-        ep? (PVOID)ep->ContextRip : NULL,
-        ep? (PVOID)(ep->ContextRip ? *((PVOID*)ep->ContextRip+1) : 0) : NULL,
-        ep? (PVOID)(ep->ContextRip ? *((PVOID*)ep->ContextRip+2) : 0) : NULL,
-        ep? (PVOID)(ep->ContextRip ? *((PVOID*)ep->ContextRip+3) : 0) : NULL);
-    fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
 }
-#pragma comment(linker, "/INCLUDE:_pdbg_crash_handler")
-static void __cdecl pdbg_crash_handler(void) { (void)CrashHandler; }
 // -----------------------------------------------------------------------
 
 void* __RPC_USER MIDL_user_allocate(size_t n) {
@@ -295,7 +287,6 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     SetUnhandledExceptionFilter(CrashHandler);
-    pdbg_crash_handler(); // keep linker from discarding
 
     LPSTR cmd = GetCommandLineA();
     DBG("argc scan: cmd=[%s]", cmd);
