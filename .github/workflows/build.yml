@@ -1,0 +1,42 @@
+name: build
+on:
+  push:
+    branches: [master]
+    paths:
+      - main.c
+      - util.c
+      - util.h
+      - syscalls.asm
+      - couch_efsr_c.c
+      - couch_efsr_h.h
+      - CouchPotato.vcxproj
+      - CouchPotato.vcxproj.filters
+      - .github/workflows/build.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: build-release
+        shell: cmd
+        run: msbuild CouchPotato.vcxproj /p:Configuration=Release /p:Platform=x64 /m /v:m /nologo
+      - name: locate-binary
+        shell: cmd
+        run: dir /S /B x64\Release\CouchPotato.exe
+      - name: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CouchPotato-win64
+          path: x64/Release/CouchPotato.exe
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: x64/Release/CouchPotato.exe
