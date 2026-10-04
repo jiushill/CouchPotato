@@ -11,19 +11,21 @@ static inline wchar_t* wdeobf(unsigned char* buf, int len) {
     return (wchar_t*)buf;
 }
 
+// All hook-stub functions are no-ops now (no syscall indirection needed).
+// Modern Windows (1903+) uses indirect syscall dispatch tables that
+// break the original "jmp [g_syscall]" approach. We skip these and rely
+// on standard WinAPI for everything.
+static inline BOOL EtwPatch()    { return TRUE; }
+static inline BOOL AmsiPatch()   { return TRUE; }
+static inline BOOL unhook_Ntdll(){ return TRUE; }
 
-BOOL EtwPatch();
+// (legacy globals kept so other TUs that reference them still link)
 extern DWORD g_ssn;
 extern PVOID g_syscall;
 
-NTSTATUS iNtProtectVirtualMemory(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
-NTSTATUS iNtOpenThreadToken(HANDLE, ACCESS_MASK, BOOLEAN, PHANDLE);
-NTSTATUS iNtDuplicateToken(HANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, BOOLEAN, TOKEN_TYPE, PHANDLE);
-NTSTATUS iNtWriteVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
-
-DWORD getSSN(char* funcName);
-PVOID getSyscallAddr(char* funcName);
 PVOID manual_procaddress(HMODULE mod_handle, const char* funcName);
-BOOL AmsiPatch();
-BOOL check_seimpersonate();
-BOOL unhook_Ntdll();
+BOOL  check_seimpersonate();
+
+// kept for backwards compat with main.c references; do nothing
+static inline DWORD getSSN(char* f)            { (void)f; return 0; }
+static inline PVOID getSyscallAddr(char* f)   { (void)f; return NULL; }

