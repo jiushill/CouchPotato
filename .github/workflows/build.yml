@@ -23,13 +23,21 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      - name: build-debug
+        shell: cmd
+        run: msbuild CouchPotato.vcxproj /p:Configuration=Debug /p:Platform=x64 /m /v:m /nologo
       - name: build-release
         shell: cmd
         run: msbuild CouchPotato.vcxproj /p:Configuration=Release /p:Platform=x64 /m /v:m /nologo
-      - name: locate-binary
+      - name: locate-binaries
         shell: cmd
-        run: dir /S /B x64\Release\CouchPotato.exe
-      - name: upload-artifact
+        run: dir /S /B x64\Debug\CouchPotato.exe x64\Release\CouchPotato.exe
+      - name: upload-artifact-debug
+        uses: actions/upload-artifact@v4
+        with:
+          name: CouchPotato-win64-Debug
+          path: x64/Debug/CouchPotato.exe
+      - name: upload-artifact-release
         uses: actions/upload-artifact@v4
         with:
           name: CouchPotato-win64
@@ -39,4 +47,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: x64/Release/CouchPotato.exe
+          files: |
+              x64/Debug/CouchPotato.exe
+              x64/Release/CouchPotato.exe
